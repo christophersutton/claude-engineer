@@ -119,11 +119,13 @@ function appendThinkingIndicator() {
     return messageWrapper;
 }
 
-// Add command+enter handler
+// Add enter/shift+enter handler
 document.getElementById('message-input').addEventListener('keydown', (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        document.getElementById('chat-form').dispatchEvent(new Event('submit'));
+    if (e.key === 'Enter') {
+        if (!e.shiftKey) {
+            e.preventDefault();
+            document.getElementById('chat-form').dispatchEvent(new Event('submit'));
+        }
     }
 });
 
