@@ -127,4 +127,4 @@ def reset():
     return jsonify({'status': 'success'})
 
 if __name__ == '__main__':
-    app.run(debug=False) 
+    app.run(debug=False, port=5001)  # or any other port like 8000 
