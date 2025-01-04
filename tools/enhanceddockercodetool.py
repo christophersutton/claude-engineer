@@ -50,13 +50,63 @@ class EnhancedDockerCodeTool(BaseTool):
         self.downloads_dir = Path('./downloads')
         self.downloads_dir.mkdir(exist_ok=True)
 
+    def _find_matching_file(self, file_hint):
+        """Smart file matching based on filename hints"""
+        if not self.uploads_dir.exists():
+            return None
+            
+        # Convert hint to lowercase for case-insensitive matching
+        hint_lower = file_hint.lower()
+        
+        # Common file extensions to check
+        extensions = ['.csv', '.txt', '.json', '.xlsx', '.pdf', '.py']
+        
+        # First try exact matches
+        for file in self.uploads_dir.glob('*'):
+            if file_hint == file.name:
+                return file
+                
+        # Then try contains matching with extensions
+        for file in self.uploads_dir.glob('*'):
+            file_lower = file.name.lower()
+            if hint_lower in file_lower:
+                return file
+                
+        # Try matching specific patterns
+        patterns = {
+            'sales': ['*sales*.csv', '*revenue*.csv', '*orders*.csv'],
+            'report': ['*report*.pdf', '*report*.xlsx', '*report*.csv'],
+            'config': ['*config*.json', '*settings*.json', '*conf*.yaml'],
+            'data': ['*data*.csv', '*data*.json', '*dataset*.csv']
+        }
+        
+        for key, patterns_list in patterns.items():
+            if key in hint_lower:
+                for pattern in patterns_list:
+                    matches = list(self.uploads_dir.glob(pattern))
+                    if matches:
+                        return matches[0]
+                        
+        return None
+
     def resolve_upload_path(self, file_path):
         path = Path(file_path)
-        if not path.is_absolute():
-            path = self.uploads_dir / path
-        if not path.exists():
-            raise FileNotFoundError(f"Upload file not found: {path}")
-        return path
+        
+        # If it's an absolute path and exists, use it directly
+        if path.is_absolute() and path.exists():
+            return path
+            
+        # If it's in uploads directory, use it
+        uploads_path = self.uploads_dir / path
+        if uploads_path.exists():
+            return uploads_path
+            
+        # Try smart matching
+        matched_file = self._find_matching_file(file_path)
+        if matched_file:
+            return matched_file
+            
+        raise FileNotFoundError(f"Could not find file matching: {file_path}")
 
     def prepare_container(self, requirements=None, env_vars=None):
         container_config = {
