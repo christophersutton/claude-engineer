@@ -14,6 +14,8 @@ class DocumentationScraperTool(BaseTool):
     Scrapes documentation websites and converts them to structured Markdown files.
     Preserves hierarchy, formatting and technical content while creating a browsable
     local documentation copy with proper internal linking.
+    
+    Note: This tool handles web scraping, file creation, and folder management internally.
     '''
     input_schema = {
         "type": "object",
@@ -41,9 +43,9 @@ class DocumentationScraperTool(BaseTool):
     }
 
     def __init__(self):
-        self.scraper = WebScraperTool()
-        self.file_creator = FileCreatorTool()
-        self.folder_creator = CreateFoldersTool()
+        self._scraper = WebScraperTool()
+        self._file_creator = FileCreatorTool()
+        self._folder_creator = CreateFoldersTool()
         self.processed_urls = set()
         self.toc_entries = []
 
@@ -118,7 +120,7 @@ class DocumentationScraperTool(BaseTool):
         self.processed_urls.add(url)
         
         # Get page content
-        response = self.scraper.execute(url=url)
+        response = self._scraper.execute(url=url)
         if not response:
             return
             
@@ -136,7 +138,7 @@ class DocumentationScraperTool(BaseTool):
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
         # Save content
-        self.file_creator.execute(
+        self._file_creator.execute(
             content=clean_content,
             filepath=file_path
         )
@@ -162,7 +164,7 @@ class DocumentationScraperTool(BaseTool):
             toc_content += f"{indent}* [{entry['title']}]({entry['path']})\n"
             
         toc_path = os.path.join(self.output_dir, 'TOC.md')
-        self.file_creator.execute(
+        self._file_creator.execute(
             content=toc_content,
             filepath=toc_path
         )
@@ -174,7 +176,7 @@ class DocumentationScraperTool(BaseTool):
         max_depth = kwargs.get('max_depth', 5)
         
         # Create output directory
-        self.folder_creator.execute(folder_path=self.output_dir)
+        self._folder_creator.execute(folder_path=self.output_dir)
         
         # Start scraping from base URL
         self.scrape_page(self.base_url, 1, max_depth)
