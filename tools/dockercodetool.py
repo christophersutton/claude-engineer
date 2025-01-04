@@ -1,219 +1,182 @@
+import os
 import docker
 import tempfile
-import os
-import json
-import base64
-from tools.base import BaseTool
-from pathlib import Path
-import logging
 import shutil
+from pathlib import Path
+from tools.base import BaseTool
 
 class DockerCodeTool(BaseTool):
     name = "dockercodetool"
     description = '''
-    Executes Python code safely in a Docker container with:
-    - Isolated environment from host system
-    - Resource limitations (memory, CPU)
-    - Controlled network access
-    - Clean environment for each execution
-    - File upload/download support
-    - Environment variable support
-    
-    Returns execution results including stdout, stderr, and file contents.
+    Docker-based Python code execution tool with improved file handling.
+    Supports automatic upload/download directory management and smart path resolution.
+    Executes Python code in isolated Docker containers with file transfer capabilities.
     '''
-    
     input_schema = {
         "type": "object",
         "properties": {
-            "code": {
-                "type": "string",
-                "description": "Python code to execute"
-            },
-            "env_vars": {
-                "type": "object",
-                "description": "Dictionary of environment variables",
-                "additionalProperties": {"type": "string"}
-            },
+            "code": {"type": "string", "description": "Python code to execute"},
             "upload_files": {
                 "type": "array",
-                "description": "List of files to upload to container",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "path": {"type": "string"},
                         "container_path": {"type": "string"},
                         "content": {"type": "string"}
-                    },
-                    "required": ["container_path", "content"]
+                    }
                 }
             },
             "download_paths": {
                 "type": "array",
-                "description": "List of file paths to download from container",
                 "items": {"type": "string"}
             },
             "requirements": {
                 "type": "array",
-                "description": "List of pip packages to install",
                 "items": {"type": "string"}
+            },
+            "env_vars": {
+                "type": "object",
+                "additionalProperties": {"type": "string"}
             }
         },
         "required": ["code"]
     }
 
     def __init__(self):
+        super().__init__()
         self.client = docker.from_env()
-        self.base_image = "python:3.11-slim"
-        
-        # Create base image with common dependencies if it doesn't exist
-        self._ensure_base_image()
+        self.uploads_dir = Path('./uploads')
+        self.downloads_dir = Path('./downloads')
+        self.downloads_dir.mkdir(exist_ok=True)
 
-    def _ensure_base_image(self):
-        """Create a custom base image with common dependencies."""
-        dockerfile = """
-        FROM python:3.11-slim
-        RUN apt-get update && apt-get install -y --no-install-recommends \
-            gcc \
-            python3-dev \
-            && rm -rf /var/lib/apt/lists/*
-        WORKDIR /code
-        """
-        
-        try:
-            self.client.images.get("python-sandbox:latest")
-        except docker.errors.ImageNotFound:
-            # Create temporary directory in a more accessible location
-            temp_dir = tempfile.mkdtemp(prefix='dockertool-')
-            dockerfile_path = os.path.join(temp_dir, 'Dockerfile')
+    def _find_matching_file(self, file_hint):
+        """Smart file matching based on filename hints"""
+        if not self.uploads_dir.exists():
+            return None
             
-            try:
-                with open(dockerfile_path, 'w') as f:
-                    f.write(dockerfile)
+        # Convert hint to lowercase for case-insensitive matching
+        hint_lower = file_hint.lower()
+        
+        # Common file extensions to check
+        extensions = ['.csv', '.txt', '.json', '.xlsx', '.pdf', '.py']
+        
+        # First try exact matches
+        for file in self.uploads_dir.glob('*'):
+            if file_hint == file.name:
+                return file
                 
-                self.client.images.build(
-                    path=temp_dir,
-                    dockerfile=dockerfile_path,
-                    tag="python-sandbox:latest"
-                )
-            finally:
-                # Clean up temporary directory
-                shutil.rmtree(temp_dir, ignore_errors=True)
+        # Then try contains matching with extensions
+        for file in self.uploads_dir.glob('*'):
+            file_lower = file.name.lower()
+            if hint_lower in file_lower:
+                return file
+                
+        # Try matching specific patterns
+        patterns = {
+            'sales': ['*sales*.csv', '*revenue*.csv', '*orders*.csv'],
+            'report': ['*report*.pdf', '*report*.xlsx', '*report*.csv'],
+            'config': ['*config*.json', '*settings*.json', '*conf*.yaml'],
+            'data': ['*data*.csv', '*data*.json', '*dataset*.csv']
+        }
+        
+        for key, patterns_list in patterns.items():
+            if key in hint_lower:
+                for pattern in patterns_list:
+                    matches = list(self.uploads_dir.glob(pattern))
+                    if matches:
+                        return matches[0]
+                        
+        return None
 
-    def _prepare_container_files(self, code: str, upload_files: list, requirements: list) -> str:
-        """Prepare files for the container including the main script and uploaded files."""
-        temp_dir = tempfile.mkdtemp(prefix='dockertool-run-')
+    def resolve_upload_path(self, file_path):
+        path = Path(file_path)
         
-        # Create main script with requirements installation
-        main_script = Path(temp_dir) / "main.py"
-        
-        # If there are requirements, prepend pip install
-        setup_code = ""
-        if requirements:
-            setup_code = f"""
-import subprocess
-import sys
-
-def install_requirements():
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-
-install_requirements()
-"""
-        
-        # Write the complete script
-        main_script.write_text(setup_code + code)
-        
-        # Create requirements.txt if needed
-        if requirements:
-            reqs_file = Path(temp_dir) / "requirements.txt"
-            reqs_file.write_text("\n".join(requirements))
-        
-        # Handle uploaded files
-        for file_spec in upload_files:
-            file_path = Path(temp_dir) / os.path.basename(file_spec["container_path"])
-            content = file_spec["content"]
+        # If it's an absolute path and exists, use it directly
+        if path.is_absolute() and path.exists():
+            return path
             
-            # Handle base64 content
-            if ";base64," in content:
-                content = content.split(";base64,")[1]
-                file_path.write_bytes(base64.b64decode(content))
-            else:
-                file_path.write_text(content)
+        # If it's in uploads directory, use it
+        uploads_path = self.uploads_dir / path
+        if uploads_path.exists():
+            return uploads_path
+            
+        # Try smart matching
+        matched_file = self._find_matching_file(file_path)
+        if matched_file:
+            return matched_file
+            
+        raise FileNotFoundError(f"Could not find file matching: {file_path}")
+
+    def prepare_container(self, requirements=None, env_vars=None):
+        container_config = {
+            "image": "python:3.9-slim",
+            "command": "tail -f /dev/null",
+            "detach": True,
+            "remove": True,
+            "environment": env_vars or {}
+        }
+        container = self.client.containers.run(**container_config)
         
-        return temp_dir
+        if requirements:
+            requirements_str = " ".join(requirements)
+            container.exec_run(f"pip install {requirements_str}")
+        
+        return container
 
     def execute(self, **kwargs) -> str:
-        temp_dir = None
-        try:
-            code = kwargs.get("code")
-            env_vars = kwargs.get("env_vars", {})
-            upload_files = kwargs.get("upload_files", [])
-            download_paths = kwargs.get("download_paths", [])
-            requirements = kwargs.get("requirements", [])
+        code = kwargs.get("code")
+        upload_files = kwargs.get("upload_files", [])
+        download_paths = kwargs.get("download_paths", [])
+        requirements = kwargs.get("requirements", [])
+        env_vars = kwargs.get("env_vars", {})
 
-            # Prepare temporary directory with all files
-            temp_dir = self._prepare_container_files(code, upload_files, requirements)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            script_path = temp_path / "script.py"
+            script_path.write_text(code)
 
-            # Create container with proper mounts and restrictions
-            container = self.client.containers.create(
-                "python-sandbox:latest",
-                command=["python", "/code/main.py"],
-                volumes={
-                    temp_dir: {
-                        'bind': '/code',
-                        'mode': 'rw'
-                    }
-                },
-                environment=env_vars,
-                mem_limit="512m",  # Limit memory to 512MB
-                memswap_limit="512m",  # Disable swap
-                cpu_period=100000,  # Default CPU CFS period
-                cpu_quota=50000,  # Limit to 50% of CPU
-                network_disabled=True,  # Disable network access
-                user="nobody"  # Run as non-root user
-            )
-
+            container = self.prepare_container(requirements, env_vars)
+            
             try:
-                # Start container and wait for completion
-                container.start()
-                result = container.wait(timeout=30)  # 30 second timeout
+                for file_spec in upload_files:
+                    if "content" in file_spec:
+                        container_path = file_spec["container_path"]
+                        content = file_spec["content"]
+                        temp_file = temp_path / "temp_content"
+                        temp_file.write_text(content)
+                        tar_data = docker.utils.tar(str(temp_file))
+                        container.put_archive("/", tar_data)
+                    else:
+                        local_path = self.resolve_upload_path(file_spec["path"])
+                        container_path = file_spec["container_path"]
+                        tar_data = docker.utils.tar(str(local_path))
+                        container.put_archive("/", tar_data)
 
-                # Get output, capturing both stdout and stderr
-                stdout = container.logs(stdout=True, stderr=False).decode('utf-8')
-                stderr = container.logs(stdout=False, stderr=True).decode('utf-8')
+                container.put_archive("/", docker.utils.tar(str(script_path)))
+                result = container.exec_run(f"python /script.py")
                 
-                # Get downloaded files
-                downloaded_files = {}
-                for path in download_paths:
+                for download_path in download_paths:
                     try:
-                        bits, _ = container.get_archive(f"/code/{os.path.basename(path)}")
-                        content = b"".join([chunk for chunk in bits])
-                        downloaded_files[path] = f"data:application/octet-stream;base64,{base64.b64encode(content).decode('utf-8')}"
-                    except Exception as e:
-                        downloaded_files[path] = f"Error downloading: {str(e)}"
+                        bits, stat = container.get_archive(download_path)
+                        download_file = self.downloads_dir / Path(download_path).name
+                        with open(download_file, 'wb') as f:
+                            for chunk in bits:
+                                f.write(chunk)
+                    except docker.errors.NotFound:
+                        print(f"Warning: Download file not found: {download_path}")
 
-                response = {
-                    "success": result["StatusCode"] == 0,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "error": None if result["StatusCode"] == 0 else f"Exit code: {result['StatusCode']}",
-                    "downloaded_files": downloaded_files
-                }
+                return result.output.decode('utf-8')
 
             finally:
-                # Cleanup container
+                container.stop()
                 container.remove(force=True)
 
-            return json.dumps(response, indent=2)
-
+    def cleanup(self):
+        try:
+            containers = self.client.containers.list(filters={"ancestor": "python:3.9-slim"})
+            for container in containers:
+                container.stop()
+                container.remove(force=True)
         except Exception as e:
-            logging.error(f"Docker code execution failed: {str(e)}")
-            return json.dumps({
-                "success": False,
-                "error": f"Tool execution failed: {str(e)}",
-                "stdout": "",
-                "stderr": str(e),
-                "downloaded_files": {}
-            }, indent=2)
-        finally:
-            # Clean up temporary directory
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"Cleanup error: {str(e)}")
